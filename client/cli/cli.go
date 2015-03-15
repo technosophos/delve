@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -76,15 +75,15 @@ func Run(args []string) {
 		}
 	}
 
-	ch := make(chan os.Signal)
-	signal.Notify(ch, sys.SIGINT)
-	go func() {
-		for _ = range ch {
-			if dbp.Running() {
-				dbp.RequestManualStop()
-			}
-		}
-	}()
+	// ch := make(chan os.Signal)
+	// signal.Notify(ch, sys.SIGINT)
+	// go func() {
+	// 	for _ = range ch {
+	// 		if dbp.Running() {
+	// 			dbp.RequestManualStop()
+	// 		}
+	// 	}
+	// }()
 
 	cmds := command.DebugCommands()
 	f, err := os.Open(historyFile)

@@ -3,10 +3,9 @@ package proctl
 import (
 	"encoding/binary"
 	"fmt"
+	"path/filepath"
 
 	sys "golang.org/x/sys/unix"
-
-	"github.com/derekparker/delve/dwarf/frame"
 )
 
 // ThreadContext represents a single thread in the traced process
@@ -62,6 +61,7 @@ func (thread *ThreadContext) Continue() error {
 	// Check whether we are stopped at a breakpoint, and
 	// if so, single step over it before continuing.
 	if _, ok := thread.Process.BreakPoints[regs.PC()-1]; ok {
+		fmt.Println("stepping over bp")
 		err := thread.Step()
 		if err != nil {
 			return fmt.Errorf("could not step %s", err)
@@ -119,6 +119,7 @@ func (thread *ThreadContext) Next() (err error) {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("current PC %#v\n", pc)
 
 	if bp, ok := thread.Process.BreakPoints[pc-1]; ok {
 		pc = bp.Addr
@@ -129,74 +130,40 @@ func (thread *ThreadContext) Next() (err error) {
 		return err
 	}
 
-	_, l, _ := thread.Process.GoSymTable.PCToLine(pc)
-	ret := thread.ReturnAddressFromOffset(fde.ReturnAddressOffset(pc))
+	loc := thread.Process.LineInfo.LocationInfoForPC(pc)
+	if loc.Delta < 0 {
+		loc = thread.Process.LineInfo.LocationInfoForFileLine(loc.File, loc.Line)
+	}
+	fmt.Printf("current loc at %#v %s:%d\n", pc, filepath.Base(loc.File), loc.Line)
+
 	for {
-		if err = thread.Step(); err != nil {
-			return err
+		loc = thread.Process.LineInfo.NextLocation(loc.Address)
+		if loc.Address == pc {
+			fmt.Printf("pc %#v address %#v\n", pc, loc.Address)
+			continue
 		}
 
-		if pc, err = thread.CurrentPC(); err != nil {
-			return err
-		}
-
-		if !fde.Cover(pc) && pc != ret {
-			if err := thread.continueToReturnAddress(pc, fde); err != nil {
-				if _, ok := err.(InvalidAddressError); !ok {
-					return err
-				}
+		if loc.Address >= fde.End() {
+			ret := thread.ReturnAddressFromOffset(fde.ReturnAddressOffset(pc) - 8)
+			bp, _ := thread.Process.Break(ret)
+			if bp != nil {
+				bp.Temp = true
 			}
-			if pc, err = thread.CurrentPC(); err != nil {
-				return err
-			}
-		}
-
-		if _, nl, _ := thread.Process.GoSymTable.PCToLine(pc); nl != l {
 			break
 		}
-	}
 
-	return nil
-}
-
-func (thread *ThreadContext) continueToReturnAddress(pc uint64, fde *frame.FrameDescriptionEntry) error {
-	for !fde.Cover(pc) {
-		// Offset is 0 because we have just stepped into this function.
-		addr := thread.ReturnAddressFromOffset(0)
-		bp, err := thread.Process.Break(addr)
+		fmt.Printf("set bp at %s:%d\n", filepath.Base(loc.File), loc.Line)
+		bp, err := thread.Process.Break(loc.Address)
 		if err != nil {
 			if _, ok := err.(BreakPointExistsError); !ok {
 				return err
 			}
+			continue
 		}
 		bp.Temp = true
-		// Ensure we cleanup after ourselves no matter what.
-		defer thread.clearTempBreakpoint(bp.Addr)
-
-		for {
-			err = thread.Continue()
-			if err != nil {
-				return err
-			}
-			// Wait on -1, just in case scheduler switches threads for this G.
-			wpid, err := trapWait(thread.Process, -1)
-			if err != nil {
-				return err
-			}
-			if wpid != thread.Id {
-				thread = thread.Process.Threads[wpid]
-			}
-			pc, err = thread.CurrentPC()
-			if err != nil {
-				return err
-			}
-			if (pc-1) == bp.Addr || pc == bp.Addr {
-				break
-			}
-		}
 	}
 
-	return nil
+	return thread.Continue()
 }
 
 // Takes an offset from RSP and returns the address of the
@@ -211,25 +178,4 @@ func (thread *ThreadContext) ReturnAddressFromOffset(offset int64) uint64 {
 	data := make([]byte, 8)
 	readMemory(thread, uintptr(retaddr), data)
 	return binary.LittleEndian.Uint64(data)
-}
-
-func (thread *ThreadContext) clearTempBreakpoint(pc uint64) error {
-	var software bool
-	if _, ok := thread.Process.BreakPoints[pc]; ok {
-		software = true
-	}
-	if _, err := thread.Process.Clear(pc); err != nil {
-		return err
-	}
-	if software {
-		// Reset program counter to our restored instruction.
-		regs, err := thread.Registers()
-		if err != nil {
-			return err
-		}
-
-		return regs.SetPC(thread, pc)
-	}
-
-	return nil
 }

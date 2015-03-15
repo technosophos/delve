@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	sys "golang.org/x/sys/unix"
 
 	"github.com/derekparker/delve/dwarf/frame"
+	"github.com/derekparker/delve/dwarf/line"
 	"github.com/derekparker/delve/dwarf/reader"
 )
 
@@ -27,6 +29,7 @@ type DebuggedProcess struct {
 	Dwarf               *dwarf.Data
 	GoSymTable          *gosym.Table
 	FrameEntries        frame.FrameDescriptionEntries
+	LineInfo            *line.DebugLineInfo
 	HWBreakPoints       [4]*BreakPoint
 	BreakPoints         map[uint64]*BreakPoint
 	Threads             map[int]*ThreadContext
@@ -85,6 +88,28 @@ func Launch(cmd []string) (*DebuggedProcess, error) {
 	}
 
 	return newDebugProcess(proc.Process.Pid, false)
+}
+
+// Finds the executable and then uses it
+// to parse the following information:
+// * Dwarf .debug_frame section
+// * Dwarf .debug_line section
+// * Go symbol table.
+func (dbp *DebuggedProcess) LoadInformation() error {
+	var wg sync.WaitGroup
+
+	exe, err := dbp.findExecutable()
+	if err != nil {
+		return err
+	}
+
+	wg.Add(3)
+	go dbp.parseDebugFrame(exe, &wg)
+	go dbp.parseDebugLineInfo(exe, &wg)
+	go dbp.obtainGoSymbols(exe, &wg)
+	wg.Wait()
+
+	return nil
 }
 
 // Returns whether or not Delve thinks the debugged
@@ -200,29 +225,42 @@ func (dbp *DebuggedProcess) Status() *sys.WaitStatus {
 
 // Step over function calls.
 func (dbp *DebuggedProcess) Next() error {
-	var runnable []*ThreadContext
-
 	fn := func() error {
-		for _, th := range dbp.Threads {
-			// Continue any blocked M so that the
-			// scheduler can continue to do its'
-			// job correctly.
-			if th.blocked() {
-				err := th.Continue()
-				if err != nil {
-					return err
+		defer func() {
+			for _, bp := range dbp.BreakPoints {
+				if bp.Temp {
+					dbp.Clear(bp.Addr)
 				}
+			}
+		}()
+
+		for _, th := range dbp.Threads {
+			if th == dbp.CurrentThread {
 				continue
 			}
-
-			runnable = append(runnable, th)
-		}
-		for _, th := range runnable {
-			err := th.Next()
-			if err != nil && err != sys.ESRCH {
+			if err := th.Continue(); err != nil {
 				return err
 			}
 		}
+		if err := dbp.CurrentThread.Next(); err != nil && err != sys.ESRCH {
+			return err
+		}
+
+		wpid, err := trapWait(dbp, -1)
+		if err != nil {
+			return err
+		}
+		fmt.Println("current new", dbp.CurrentThread.Id, wpid)
+		th := dbp.Threads[wpid]
+		regs, err := dbp.Registers()
+		if err != nil {
+			return err
+		}
+		err = regs.SetPC(th, regs.PC()-1)
+		if err != nil {
+			return err
+		}
+
 		return dbp.Halt()
 	}
 	return dbp.run(fn)
@@ -246,12 +284,6 @@ func (dbp *DebuggedProcess) Continue() error {
 		if !ok {
 			return fmt.Errorf("could not find thread for %d", wpid)
 		}
-
-		if wpid != dbp.CurrentThread.Id {
-			fmt.Printf("thread context changed from %d to %d\n", dbp.CurrentThread.Id, thread.Id)
-			dbp.CurrentThread = thread
-		}
-
 		pc, err := thread.CurrentPC()
 		if err != nil {
 			return err

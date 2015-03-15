@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/derekparker/delve/dwarf/frame"
+	"github.com/derekparker/delve/dwarf/line"
 	sys "golang.org/x/sys/unix"
 )
 
@@ -116,6 +117,22 @@ func (dbp *DebuggedProcess) addThread(port int, attach bool) (*ThreadContext, er
 	return thread, nil
 }
 
+func (dbp *DebuggedProcess) parseDebugLineInfo(exe *macho.File, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	if sec := exe.Section("__debug_line"); sec != nil {
+		debugLine, err := exe.Section("__debug_line").Data()
+		if err != nil {
+			fmt.Println("could not get __debug_line section", err)
+			os.Exit(1)
+		}
+		dbp.LineInfo = line.Parse(debugLine)
+	} else {
+		fmt.Println("could not find __debug_line section in binary")
+		os.Exit(1)
+	}
+}
+
 func (dbp *DebuggedProcess) parseDebugFrame(exe *macho.File, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -168,11 +185,23 @@ func (dbp *DebuggedProcess) obtainGoSymbols(exe *macho.File, wg *sync.WaitGroup)
 }
 
 func (dbp *DebuggedProcess) findExecutable() (*macho.File, error) {
+	if ret := C.acquire_mach_task(C.int(dbp.Pid), &dbp.os.task, &dbp.os.exceptionPort); ret != C.KERN_SUCCESS {
+		return nil, fmt.Errorf("could not acquire mach task %d", ret)
+	}
+
 	pathptr, err := C.find_executable(C.int(dbp.Pid))
 	if err != nil {
 		return nil, err
 	}
-	return macho.Open(C.GoString(pathptr))
+
+	f, err := macho.Open(C.GoString(pathptr))
+	data, err := f.DWARF()
+	if err != nil {
+		return nil, err
+	}
+
+	dbp.Dwarf = data
+	return f, nil
 }
 
 func trapWait(dbp *DebuggedProcess, pid int) (int, error) {
@@ -191,6 +220,12 @@ func trapWait(dbp *DebuggedProcess, pid int) (int, error) {
 	}
 
 	dbp.updateThreadList()
+
+	if int(port) != dbp.CurrentThread.Id {
+		fmt.Printf("thread context changed from %d to %d\n", dbp.CurrentThread.Id, port)
+		dbp.CurrentThread = dbp.Threads[int(port)]
+	}
+
 	return int(port), nil
 }
 

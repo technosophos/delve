@@ -219,7 +219,6 @@ func TestNext(t *testing.T) {
 		{34, 35},
 		{35, 41},
 		{41, 40},
-		{40, 41},
 	}
 
 	fp, err := filepath.Abs("../_fixtures/testnextprog.go")
@@ -236,14 +235,14 @@ func TestNext(t *testing.T) {
 		f, ln := currentLineNumber(p, t)
 		for _, tc := range testcases {
 			if ln != tc.begin {
-				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, f, ln)
+				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, filepath.Base(f), ln)
 			}
 
 			assertNoError(p.Next(), t, "Next() returned an error")
 
 			f, ln = currentLineNumber(p, t)
 			if ln != tc.end {
-				t.Fatalf("Program did not continue to correct next location expected %d was %s:%d", tc.end, f, ln)
+				t.Fatalf("Program did not continue to correct next location expected %d was %s:%d", tc.end, filepath.Base(f), ln)
 			}
 		}
 

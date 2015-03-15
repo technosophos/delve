@@ -9,7 +9,7 @@ import (
 	"github.com/derekparker/delve/client/cli"
 )
 
-const version string = "0.5.0.beta"
+const version string = "0.5.2.beta"
 
 var usage string = fmt.Sprintf(`Delve version %s
 

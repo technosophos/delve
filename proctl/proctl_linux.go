@@ -13,6 +13,7 @@ import (
 	sys "golang.org/x/sys/unix"
 
 	"github.com/derekparker/delve/dwarf/frame"
+	"github.com/derekparker/delve/dwarf/line"
 )
 
 const (
@@ -31,31 +32,6 @@ func (dbp *DebuggedProcess) Halt() (err error) {
 			return err
 		}
 	}
-	return nil
-}
-
-// Finds the executable from /proc/<pid>/exe and then
-// uses that to parse the following information:
-// * Dwarf .debug_frame section
-// * Dwarf .debug_line section
-// * Go symbol table.
-func (dbp *DebuggedProcess) LoadInformation() error {
-	var (
-		wg  sync.WaitGroup
-		exe *elf.File
-		err error
-	)
-
-	exe, err = dbp.findExecutable()
-	if err != nil {
-		return err
-	}
-
-	wg.Add(2)
-	go dbp.parseDebugFrame(exe, &wg)
-	go dbp.obtainGoSymbols(exe, &wg)
-	wg.Wait()
-
 	return nil
 }
 
@@ -151,6 +127,22 @@ func (dbp *DebuggedProcess) findExecutable() (*elf.File, error) {
 	dbp.Dwarf = data
 
 	return elffile, nil
+}
+
+func (dbp *DebuggedProcess) parseDebugLineInfo(exe *elf.File, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	if sec := exe.Section(".debug_line"); sec != nil {
+		debugLine, err := exe.Section(".debug_line").Data()
+		if err != nil {
+			fmt.Println("could not get .debug_line section", err)
+			os.Exit(1)
+		}
+		dbp.LineInfo = line.Parse(debugLine)
+	} else {
+		fmt.Println("could not find .debug_line section in binary")
+		os.Exit(1)
+	}
 }
 
 func (dbp *DebuggedProcess) parseDebugFrame(exe *elf.File, wg *sync.WaitGroup) {
@@ -264,6 +256,10 @@ func trapWait(dbp *DebuggedProcess, pid int) (int, error) {
 			continue
 		}
 		if status.StopSignal() == sys.SIGTRAP {
+			if wpid != dbp.CurrentThread.Id {
+				fmt.Printf("thread context changed from %d to %d\n", dbp.CurrentThread.Id, thread.Id)
+				dbp.CurrentThread = dbp.Threads[wpid]
+			}
 			return wpid, nil
 		}
 		if status.StopSignal() == sys.SIGSTOP && dbp.halt {
