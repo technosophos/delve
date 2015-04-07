@@ -3,6 +3,7 @@ package proctl
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,14 +195,12 @@ func TestClearBreakPoint(t *testing.T) {
 }
 
 func TestNext(t *testing.T) {
-	var (
-		err            error
-		executablePath = "../_fixtures/testnextprog"
-	)
+	var executablePath = "../_fixtures/testnextprog"
 
 	testcases := []struct {
 		begin, end int
 	}{
+		{17, 19},
 		{19, 20},
 		{20, 23},
 		{23, 24},
@@ -216,25 +215,19 @@ func TestNext(t *testing.T) {
 		{24, 26},
 		{26, 27},
 		{27, 34},
-		{34, 41},
-		{41, 40},
-		{40, 41},
-	}
-
-	fp, err := filepath.Abs("../_fixtures/testnextprog.go")
-	if err != nil {
-		t.Fatal(err)
+		{34, 35},
+		{35, 41},
 	}
 
 	withTestProcess(executablePath, t, func(p *DebuggedProcess) {
-		pc, _, _ := p.goSymTable.LineToPC(fp, testcases[0].begin)
-		_, err := p.Break(pc)
+		bp, err := p.BreakByLocation("main.testnext")
 		assertNoError(err, t, "Break()")
 		assertNoError(p.Continue(), t, "Continue()")
-		p.Clear(pc)
+		p.Clear(bp.Addr)
 
 		f, ln := currentLineNumber(p, t)
 		for _, tc := range testcases {
+			fmt.Printf("begin: %d end: %d\n", tc.begin, tc.end)
 			if ln != tc.begin {
 				t.Fatalf("Program not stopped at correct spot expected %d was %s:%d", tc.begin, filepath.Base(f), ln)
 			}
@@ -247,7 +240,6 @@ func TestNext(t *testing.T) {
 			}
 		}
 
-		p.Clear(pc)
 		if len(p.BreakPoints) != 0 {
 			t.Fatal("Not all breakpoints were cleaned up", len(p.HWBreakPoints))
 		}

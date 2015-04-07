@@ -1,8 +1,8 @@
+// fix lines
 package main
 
 import (
 	"fmt"
-	"runtime"
 	"time"
 )
 
@@ -14,7 +14,7 @@ func helloworld() {
 	fmt.Println("Hello, World!")
 }
 
-func testnext() {
+func testnext(d chan interface{}) {
 	var (
 		j = 1
 		f = 2
@@ -32,12 +32,12 @@ func testnext() {
 	}
 
 	helloworld()
+	close(d)
 }
 
 func main() {
-	runtime.LockOSThread()
-	for {
-		testnext()
-		fmt.Println("foo")
-	}
+	d := make(chan interface{})
+	go testnext(d)
+	<-d
+	fmt.Println("DONE")
 }

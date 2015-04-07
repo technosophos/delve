@@ -3,7 +3,9 @@ package proctl
 import (
 	"encoding/binary"
 	"fmt"
+	"path/filepath"
 
+	"github.com/derekparker/delve/dwarf/frame"
 	sys "golang.org/x/sys/unix"
 )
 
@@ -167,19 +169,31 @@ func (thread *ThreadContext) Next() (err error) {
 	// Get current file/line.
 	f, l, _ := thread.Process.goSymTable.PCToLine(curpc)
 
+	if filepath.Ext(f) == ".c" {
+		thread.cnext(curpc, fde, f, l)
+	} else {
+		thread.next(curpc, fde, f, l)
+	}
+	return thread.Continue()
+}
+
+func (thread *ThreadContext) next(curpc uint64, fde *frame.FrameDescriptionEntry, file string, line int) error {
 	// Find any line we could potentially get to.
-	lines, err := thread.Process.ast.NextLines(f, l)
+	lines, err := thread.Process.ast.NextLines(file, line)
 	if err != nil {
 		return err
 	}
 
+	fmt.Println("next lines", lines)
 	// Set a breakpoint at every line reachable from our location.
 	for _, l := range lines {
-		pcs := thread.Process.lineInfo.AllPCsForFileLine(f, l)
+		pcs := thread.Process.lineInfo.AllPCsForFileLine(file, l)
 		for _, pc := range pcs {
 			if pc == curpc {
 				continue
 			}
+			// If one of the PCs we get is not covered by our current stack frame, likely we are near the
+			// end of a function. Set the return address as one of the potential next line candidates.
 			if !fde.Cover(pc) {
 				pc = thread.ReturnAddressFromOffset(fde.ReturnAddressOffset(curpc))
 			}
@@ -193,7 +207,16 @@ func (thread *ThreadContext) Next() (err error) {
 			bp.Temp = true
 		}
 	}
-	return thread.Continue()
+	return nil
+}
+
+func (thread *ThreadContext) cnext(curpc uint64, fde *frame.FrameDescriptionEntry, file string, line int) error {
+	// We are in c land, we cannot rely on the Go AST.
+	// Ideas:
+	// * Use DWARF line info to figure out next line
+	// * Assume we're not supposed to be here and continue out of function (will not work long term)
+	// * Fall back to single step implementation (not acceptable for parallelism)
+	return nil
 }
 
 func (thread *ThreadContext) SetPC(pc uint64) error {
