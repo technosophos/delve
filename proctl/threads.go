@@ -170,9 +170,13 @@ func (thread *ThreadContext) Next() (err error) {
 	f, l, _ := thread.Process.goSymTable.PCToLine(curpc)
 
 	if filepath.Ext(f) == ".c" {
-		thread.cnext(curpc, fde, f, l)
+		if err = thread.cnext(curpc, fde, f, l); err != nil {
+			return err
+		}
 	} else {
-		thread.next(curpc, fde, f, l)
+		if err = thread.next(curpc, fde, f, l); err != nil {
+			return err
+		}
 	}
 	return thread.Continue()
 }

@@ -1,6 +1,7 @@
 package source
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -33,6 +34,9 @@ func (s *Searcher) FirstNodeAt(fname string, line int) (ast.Node, error) {
 		}
 		return true
 	})
+	if node == nil {
+		return nil, fmt.Errorf("could not find node at %s:%d", fname, line)
+	}
 	return node, nil
 }
 
@@ -83,11 +87,11 @@ func (s *Searcher) NextLines(fname string, line int) (lines []int, err error) {
 		if x.Else == nil {
 			// Grab first line after entire 'if' block
 			rbrace = s.fileset.Position(x.Body.Rbrace).Line
-			n, err := s.FirstNodeAt(fname, 1)
+			f, err := s.parse(fname)
 			if err != nil {
 				return nil, err
 			}
-			ast.Inspect(n, func(n ast.Node) bool {
+			ast.Inspect(f, func(n ast.Node) bool {
 				if n == nil {
 					return true
 				}
