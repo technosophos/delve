@@ -33,11 +33,14 @@ type M struct {
 }
 
 type G struct {
-	Id   int
-	PC   uint64
-	File string
-	Line int
-	Func *gosym.Func
+	Id         int
+	PC         uint64
+	SP         uint64
+	GoPC       uint64
+	File       string
+	Line       int
+	Func       *gosym.Func
+	WaitReason string
 }
 
 const ptrsize uintptr = unsafe.Sizeof(int(1))
@@ -209,40 +212,81 @@ func parseAllMPtr(dbp *DebuggedProcess, reader *dwarf.Reader) (uint64, error) {
 	return uint64(addr), nil
 }
 
-func parseG(dbp *DebuggedProcess, addr uint64, reader *dwarf.Reader) (*G, error) {
-	gaddrbytes, err := dbp.CurrentThread.readMemory(uintptr(addr), ptrsize)
+type NoGError struct {
+	tid int
+}
+
+func (ng NoGError) Error() string {
+	return fmt.Sprintf("no G executing on thread %d", ng.tid)
+}
+
+func parseG(thread *ThreadContext, addr uint64, reader *dwarf.Reader) (*G, error) {
+	gaddrbytes, err := thread.readMemory(uintptr(addr), ptrsize)
 	if err != nil {
 		return nil, fmt.Errorf("error derefing *G %s", err)
 	}
 	initialInstructions := append([]byte{op.DW_OP_addr}, gaddrbytes...)
+	gaddr := binary.LittleEndian.Uint64(gaddrbytes)
+	fmt.Println("gaddr", gaddr)
+	if gaddr == 0 {
+		return nil, NoGError{tid: thread.Id}
+	}
 
 	reader.Seek(0)
-	goidaddr, err := offsetFor(dbp, "goid", reader, initialInstructions)
+	goidaddr, err := offsetFor("goid", reader, initialInstructions)
 	if err != nil {
 		return nil, err
 	}
-	reader.Seek(0)
-	schedaddr, err := offsetFor(dbp, "sched", reader, initialInstructions)
-	if err != nil {
-		return nil, err
-	}
-
-	goidbytes, err := dbp.CurrentThread.readMemory(uintptr(goidaddr), ptrsize)
+	goidbytes, err := thread.readMemory(uintptr(goidaddr), ptrsize)
 	if err != nil {
 		return nil, fmt.Errorf("error reading goid %s", err)
 	}
-	schedbytes, err := dbp.CurrentThread.readMemory(uintptr(schedaddr+uint64(ptrsize)), ptrsize)
+	reader.Seek(0)
+	gopcaddr, err := offsetFor("gopc", reader, initialInstructions)
 	if err != nil {
-		return nil, fmt.Errorf("error reading sched %s", err)
+		return nil, err
 	}
-	gopc := binary.LittleEndian.Uint64(schedbytes)
-	f, l, fn := dbp.goSymTable.PCToLine(gopc)
+	gopcbytes, err := thread.readMemory(uintptr(gopcaddr), ptrsize)
+	if err != nil {
+		return nil, fmt.Errorf("error reading gopc %s", err)
+	}
+	reader.Seek(0)
+	schedaddr, err := offsetFor("sched", reader, initialInstructions)
+	if err != nil {
+		return nil, err
+	}
+	reader.Seek(0)
+	waitreasonaddr, err := offsetFor("waitreason", reader, initialInstructions)
+	if err != nil {
+		return nil, err
+	}
+	waitreason, err := thread.readString(uintptr(waitreasonaddr))
+	if err != nil {
+		return nil, err
+	}
+
+	pcbytes, err := thread.readMemory(uintptr(schedaddr+uint64(ptrsize)), ptrsize)
+	if err != nil {
+		return nil, fmt.Errorf("error reading goroutine PC %s", err)
+	}
+	gopc := binary.LittleEndian.Uint64(pcbytes)
+
+	spbytes, err := thread.readMemory(uintptr(schedaddr), ptrsize)
+	if err != nil {
+		return nil, fmt.Errorf("error reading goroutine SP %s", err)
+	}
+	gosp := binary.LittleEndian.Uint64(spbytes)
+
+	f, l, fn := thread.Process.goSymTable.PCToLine(gopc)
 	g := &G{
-		Id:   int(binary.LittleEndian.Uint64(goidbytes)),
-		PC:   gopc,
-		File: f,
-		Line: l,
-		Func: fn,
+		Id:         int(binary.LittleEndian.Uint64(goidbytes)),
+		GoPC:       binary.LittleEndian.Uint64(gopcbytes),
+		PC:         gopc,
+		SP:         gosp,
+		File:       f,
+		Line:       l,
+		Func:       fn,
+		WaitReason: waitreason,
 	}
 	return g, nil
 }
@@ -286,7 +330,7 @@ func addressFor(dbp *DebuggedProcess, name string, reader *dwarf.Reader) (uint64
 	return uint64(addr), nil
 }
 
-func offsetFor(dbp *DebuggedProcess, name string, reader *dwarf.Reader, parentinstr []byte) (uint64, error) {
+func offsetFor(name string, reader *dwarf.Reader, parentinstr []byte) (uint64, error) {
 	entry, err := findDwarfEntry(name, reader, true)
 	if err != nil {
 		return 0, err

@@ -194,33 +194,14 @@ func TestClearBreakPoint(t *testing.T) {
 	})
 }
 
-func TestNext(t *testing.T) {
+type nextTest struct {
+	begin, end int
+}
+
+func testnext(testcases []nextTest, initialLocation string, t *testing.T) {
 	var executablePath = "../_fixtures/testnextprog"
-
-	testcases := []struct {
-		begin, end int
-	}{
-		{17, 19},
-		{19, 20},
-		{20, 23},
-		{23, 24},
-		{24, 26},
-		{26, 31},
-		{31, 23},
-		{23, 24},
-		{24, 26},
-		{26, 31},
-		{31, 23},
-		{23, 24},
-		{24, 26},
-		{26, 27},
-		{27, 34},
-		{34, 35},
-		{35, 41},
-	}
-
 	withTestProcess(executablePath, t, func(p *DebuggedProcess) {
-		bp, err := p.BreakByLocation("main.testnext")
+		bp, err := p.BreakByLocation(initialLocation)
 		assertNoError(err, t, "Break()")
 		assertNoError(p.Continue(), t, "Continue()")
 		p.Clear(bp.Addr)
@@ -249,6 +230,44 @@ func TestNext(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestNextGeneral(t *testing.T) {
+	testcases := []nextTest{
+		{17, 19},
+		{19, 20},
+		{20, 23},
+		{23, 24},
+		{24, 26},
+		{26, 31},
+		{31, 23},
+		{23, 24},
+		{24, 26},
+		{26, 31},
+		{31, 23},
+		{23, 24},
+		{24, 26},
+		{26, 27},
+		{27, 34},
+	}
+	testnext(testcases, "main.testnext", t)
+}
+
+func TestNextGoroutine(t *testing.T) {
+	testcases := []nextTest{
+		{46, 47},
+		{47, 48},
+		{48, 42},
+	}
+	testnext(testcases, "main.testgoroutine", t)
+}
+
+func TestNextFunctionReturn(t *testing.T) {
+	testcases := []nextTest{
+		{13, 14},
+		{14, 35},
+	}
+	testnext(testcases, "main.helloworld", t)
 }
 
 func TestFindReturnAddress(t *testing.T) {
@@ -375,7 +394,8 @@ func TestFunctionCall(t *testing.T) {
 		if fn.Name != "main.main" {
 			t.Fatal("Program stopped at incorrect place")
 		}
-		if err = p.CallFn("runtime.getg", func(th *ThreadContext) error {
+		if err = p.CallFn("runtime.getg", func() error {
+			th := p.CurrentThread
 			pc, err := th.CurrentPC()
 			if err != nil {
 				t.Fatal(err)

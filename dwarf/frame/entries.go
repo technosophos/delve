@@ -57,6 +57,12 @@ func (fde *FrameDescriptionEntry) ReturnAddressOffset(pc uint64) int64 {
 	return frame.cfa.offset + frame.regs[fde.CIE.ReturnAddressRegister].offset
 }
 
+// Offset to top of current frame.
+func (fde *FrameDescriptionEntry) FrameOffset(pc uint64) int64 {
+	frame := fde.EstablishFrame(pc)
+	return frame.cfa.offset
+}
+
 type FrameDescriptionEntries []*FrameDescriptionEntry
 
 func NewFrameIndex() FrameDescriptionEntries {

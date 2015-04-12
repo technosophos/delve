@@ -217,7 +217,10 @@ func (dbp *DebuggedProcess) BreakByLocation(loc string) (*BreakPoint, error) {
 
 // Clears a breakpoint in the current thread.
 func (dbp *DebuggedProcess) Clear(addr uint64) (*BreakPoint, error) {
-	tid := dbp.CurrentThread.Id
+	return dbp.clearBreakpoint(dbp.CurrentThread.Id, addr)
+}
+
+func (dbp *DebuggedProcess) clearBreakpoint(tid int, addr uint64) (*BreakPoint, error) {
 	// Check for hardware breakpoint
 	for i, bp := range dbp.HWBreakPoints {
 		if bp == nil {
@@ -268,6 +271,46 @@ func (dbp *DebuggedProcess) next() error {
 		return err
 	}
 	defer dbp.clearTempBreakpoints()
+	allg, err := dbp.GoroutinesInfo()
+	if err != nil {
+		return err
+	}
+	for _, g := range allg {
+		if g.WaitReason == "chan receive" {
+			fmt.Println("chan receive wait", g.File, g.Line)
+			fmt.Printf("PC %#v GOPC %#v\n", g.PC, g.GoPC)
+			fde, err := dbp.frameEntries.FDEForPC(g.PC)
+			if err != nil {
+				return err
+			}
+			var ret uint64
+			// One frame up
+			{
+				retaddr := int64(g.SP) + fde.ReturnAddressOffset(g.PC)
+				data := make([]byte, 8)
+				readMemory(dbp.CurrentThread, uintptr(retaddr), data)
+				ret = binary.LittleEndian.Uint64(data)
+				fmt.Printf("first RET %#v\n", uint64(ret))
+				f, l, _ := dbp.goSymTable.PCToLine(ret)
+				fmt.Println("one frame up file/line", f, l)
+			}
+			// Two frames up
+			{
+				oldOffset := fde.FrameOffset(g.PC)
+				fde, err := dbp.frameEntries.FDEForPC(ret)
+				if err != nil {
+					return err
+				}
+				retaddr := int64(g.SP) + oldOffset + fde.ReturnAddressOffset(ret)
+				data := make([]byte, 8)
+				readMemory(dbp.CurrentThread, uintptr(retaddr), data)
+				ret = binary.LittleEndian.Uint64(data)
+				fmt.Printf("second RET %#v\n", uint64(ret))
+				f, l, _ := dbp.goSymTable.PCToLine(ret)
+				fmt.Println("two frames up file/line", f, l)
+			}
+		}
+	}
 	for _, th := range dbp.Threads {
 		if th.blocked() { // Continue threads that aren't running go code.
 			if err := th.Continue(); err != nil {
@@ -275,7 +318,12 @@ func (dbp *DebuggedProcess) next() error {
 			}
 			continue
 		}
-		if err := th.Next(); err != nil {
+		if err = th.Next(); err != nil {
+			return err
+			if err, ok := err.(GoroutineExitingError); ok {
+				fmt.Println(err)
+				continue
+			}
 			return err
 		}
 	}
@@ -398,7 +446,7 @@ func (dbp *DebuggedProcess) GoroutinesInfo() ([]*G, error) {
 	allgptr := binary.LittleEndian.Uint64(faddr)
 
 	for i := uint64(0); i < allglen; i++ {
-		g, err := parseG(dbp, allgptr+(i*uint64(ptrsize)), reader)
+		g, err := parseG(dbp.CurrentThread, allgptr+(i*uint64(ptrsize)), reader)
 		if err != nil {
 			return nil, err
 		}
@@ -423,7 +471,7 @@ func (dbp *DebuggedProcess) EvalSymbol(name string) (*Variable, error) {
 	return dbp.CurrentThread.EvalSymbol(name)
 }
 
-func (dbp *DebuggedProcess) CallFn(name string, fn func(*ThreadContext) error) error {
+func (dbp *DebuggedProcess) CallFn(name string, fn func() error) error {
 	return dbp.CurrentThread.CallFn(name, fn)
 }
 

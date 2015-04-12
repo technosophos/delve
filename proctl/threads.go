@@ -18,6 +18,7 @@ type ThreadContext struct {
 	Id      int
 	Process *DebuggedProcess
 	Status  *sys.WaitStatus
+	running bool
 	os      *OSSpecificDetails
 }
 
@@ -110,14 +111,14 @@ func (thread *ThreadContext) Step() (err error) {
 }
 
 // Call a function named `name`. This is currently _NOT_ safe.
-func (thread *ThreadContext) CallFn(name string, fn func(*ThreadContext) error) error {
+func (thread *ThreadContext) CallFn(name string, fn func() error) error {
 	f := thread.Process.goSymTable.LookupFunc(name)
 	if f == nil {
 		return fmt.Errorf("could not find function %s", name)
 	}
 
 	// Set breakpoint at the end of the function (before it returns).
-	bp, err := thread.Process.Break(f.End - 2)
+	bp, err := thread.Break(f.End - 2)
 	if err != nil {
 		return err
 	}
@@ -136,7 +137,17 @@ func (thread *ThreadContext) CallFn(name string, fn func(*ThreadContext) error) 
 	if _, err = trapWait(thread.Process, -1); err != nil {
 		return err
 	}
-	return fn(thread)
+	return fn()
+}
+
+// Set breakpoint using this thread.
+func (thread *ThreadContext) Break(addr uint64) (*BreakPoint, error) {
+	return thread.Process.setBreakpoint(thread.Id, addr)
+}
+
+// Clear breakpoint using this thread.
+func (thread *ThreadContext) Clear(addr uint64) (*BreakPoint, error) {
+	return thread.Process.clearBreakpoint(thread.Id, addr)
 }
 
 // Step to next source line.
@@ -168,17 +179,24 @@ func (thread *ThreadContext) Next() (err error) {
 
 	// Get current file/line.
 	f, l, _ := thread.Process.goSymTable.PCToLine(curpc)
-
-	if filepath.Ext(f) == ".c" {
-		if err = thread.cnext(curpc, fde, f, l); err != nil {
+	if filepath.Ext(f) == ".go" {
+		if err = thread.next(curpc, fde, f, l); err != nil {
 			return err
 		}
 	} else {
-		if err = thread.next(curpc, fde, f, l); err != nil {
+		if err = thread.cnext(curpc, fde, f, l); err != nil {
 			return err
 		}
 	}
 	return thread.Continue()
+}
+
+type GoroutineExitingError struct {
+	id int
+}
+
+func (ge GoroutineExitingError) Error() string {
+	return fmt.Sprintf("goroutine %d is exiting", ge.id)
 }
 
 func (thread *ThreadContext) next(curpc uint64, fde *frame.FrameDescriptionEntry, file string, line int) error {
@@ -188,7 +206,20 @@ func (thread *ThreadContext) next(curpc uint64, fde *frame.FrameDescriptionEntry
 		return err
 	}
 
-	fmt.Println("next lines", lines)
+	if len(lines) == 0 {
+		ret := thread.ReturnAddressFromOffset(fde.ReturnAddressOffset(curpc))
+		_, _, fn := thread.Process.goSymTable.PCToLine(ret)
+		if fn != nil && fn.Name == "runtime.goexit" {
+			g, err := thread.curG()
+			if err != nil {
+				return err
+			}
+			return GoroutineExitingError{id: g.Id}
+		}
+		return nil
+	}
+
+	fmt.Println(thread.Id, lines)
 	// Set a breakpoint at every line reachable from our location.
 	for _, l := range lines {
 		pcs := thread.Process.lineInfo.AllPCsForFileLine(file, l)
@@ -265,13 +296,13 @@ func (thread *ThreadContext) clearTempBreakpoint(pc uint64) error {
 
 func (thread *ThreadContext) curG() (*G, error) {
 	var g *G
-	err := thread.CallFn("runtime.getg", func(t *ThreadContext) error {
-		regs, err := t.Registers()
+	err := thread.CallFn("runtime.getg", func() error {
+		regs, err := thread.Registers()
 		if err != nil {
 			return err
 		}
-		reader := t.Process.dwarf.Reader()
-		g, err = parseG(t.Process, regs.SP()+uint64(ptrsize), reader)
+		reader := thread.Process.dwarf.Reader()
+		g, err = parseG(thread, regs.SP()+uint64(ptrsize), reader)
 		return err
 	})
 	return g, err

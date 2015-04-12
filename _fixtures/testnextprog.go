@@ -14,7 +14,7 @@ func helloworld() {
 	fmt.Println("Hello, World!")
 }
 
-func testnext(d chan interface{}) {
+func testnext() {
 	var (
 		j = 1
 		f = 2
@@ -32,12 +32,18 @@ func testnext(d chan interface{}) {
 	}
 
 	helloworld()
-	close(d)
 }
 
 func main() {
 	d := make(chan interface{})
-	go testnext(d)
+	testnext()
+	go testgoroutine(d)
+	<-d
 	<-d
 	fmt.Println("DONE")
+}
+
+func testgoroutine(d chan interface{}) {
+	d <- 0
+	close(d)
 }
